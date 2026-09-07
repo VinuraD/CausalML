@@ -494,6 +494,61 @@ statistic sits far from the threshold. It is the easy regime. Whether cross-mach
 agreement survives at high κ and higher levels is exactly the question E0.2 must ask, and
 this run does not answer it.
 
+
+## Gate G0 (paper plan) — GPU throughput, with an honest CPU baseline
+
+`torch` batched engine (`precision_pc/gpu.py`) against two CPU baselines, level-1 tests,
+NVIDIA MX230 (Pascal, **2 SMs**, 2 GB):
+
+| N | tests | per-test Python loop | batched NumPy | GPU fp64 | **GPU vs batched** | batched vs loop |
+|---|---|---|---|---|---|---|
+| 20 | 3 420 | 0.289 s | 0.0040 s | 0.0073 s | **0.56×** | 71× |
+| 30 | 12 180 | 0.987 s | 0.0138 s | 0.0213 s | **0.65×** | 71× |
+| 45 | 42 570 | 3.350 s | 0.0530 s | 0.0946 s | **0.56×** | 63× |
+| 60 | 102 660 | 8.607 s | 0.1242 s | 0.1500 s | **0.83×** | 69× |
+| 80 | 246 480 | 22.703 s | 0.3564 s | 0.3616 s | **0.99×** | 64× |
+
+**Against the per-test Python loop the GPU looks 75× faster. Against a batched NumPy
+implementation of the same algorithm it LOSES, up to parity at ~250k tests.** The 75×
+was entirely an artifact of a strawman baseline — exactly what the paper plan warns
+against ("report the CPU baseline as the author-maintained implementation, not a
+strawman"). Only the second column is reportable.
+
+So on a 2-SM consumer part, G0's kill condition is close to met: the GPU does not beat
+batched NumPy anywhere up to 246k tests. The trend is monotone in batch size
+(0.56 → 0.99), so the crossover sits just beyond, and an H100 with 132 SMs should cross
+far earlier — but that is a prediction, not a measurement, until the GPU job runs there.
+
+**Separately, this exposes a 60–70× optimisation of the existing CPU path.**
+`engine.evaluate` loops over tests in Python; the same algorithm batched in NumPy is
+63–71× faster at every size tested. Every laptop-side sweep in this study has been paying
+that factor.
+
+## Is the simulated low precision faithful? — yes
+
+Every Tier 1–3 number came from *simulated* reduced precision: round the inputs,
+accumulate in float64. The GPU can do the other thing — exact inputs, arithmetic actually
+in float32 — so the assumption is now testable rather than asserted. 2520 level-2 tests
+per row, 6 seeds, max |Δρ| against an FP64 reference:
+
+| κ | A: round inputs, compute fp64 | B: exact inputs, compute fp32 | C: both | flips A / B / C |
+|---|---|---|---|---|
+| 1e2 | 2.14e-07 | 3.19e-07 | 3.19e-07 | 0 / 0 / 0 |
+| 1e4 | 5.99e-06 | 5.26e-06 | 5.26e-06 | 0 / 0 / 0 |
+| 1e6 | 4.68e-05 | 9.28e-05 | 9.28e-05 | 0 / 0 / 0 |
+| 1e8 | 4.43e-04 | 5.04e-04 | 5.04e-04 | 0 / 0 / 0 |
+| 1e10 | 2.89e-03 | 2.82e-03 | 2.82e-03 | 0 / 0 / 0 |
+
+**Simulated and real single precision agree within a factor of two at every condition
+number, share the same κ scaling, and give the same (zero) flip count.** The laptop-based
+methodology is validated on real hardware. Note also B ≈ C: once the arithmetic runs in
+fp32, additionally rounding the inputs changes nothing, because fp32 compute already
+rounds every intermediate.
+
+**And zero FP32 flips even at κ = 1e10** — where the *explicit-inverse* route flipped
+0.2% at κ = 1e8. Same dtype, same conditioning, different route. Another direct
+confirmation of E0.3's thesis that the algorithm choice outweighs the dtype.
+
 ## Gate status
 
 | gate | test | status |
