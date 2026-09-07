@@ -34,4 +34,16 @@ dev = ["pytest>=8.0", "mpmath>=1.3", "causal-learn>=0.1.4"]
 precision-pc = "precision_pc.cli:main"
 
 [tool.setuptools]
-packages = ["precision_pc", "precision_pc.datasets", "precision_pc.experiments"]
+packages = [
+    "precision_pc",
+    "precision_pc.datasets",
+    "precision_pc.experiments",
+    "precision_pc.hpc",
+    "precision_pc.hpc.remote",
+]
+
+# The sbatch template and the staging script are DATA, not modules: they are executed on
+# the cluster by path. Without this they would be missing from an installed copy, and the
+# failure would only appear at submit time on the cluster.
+[tool.setuptools.package-data]
+"precision_pc.hpc.remote" = ["*.sbatch", "*.sh"]

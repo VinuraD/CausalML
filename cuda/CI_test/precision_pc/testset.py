@@ -145,10 +145,13 @@ class TestSet:
                 b"lmax": str(self.lmax).encode(),
             }
         )
-        tmp = path.with_suffix(path.suffix + ".tmp")
+        # Unique temp name: several array tasks write the same test-set artifact
+        # concurrently. See precision_pc/atomic.py.
+        from . import atomic
+
+        tmp = atomic.tmp_sibling(path)
         pq.write_table(table, tmp, compression="zstd")
-        tmp.replace(path)
-        return path
+        return atomic.finalize(tmp, path)
 
     @staticmethod
     def from_parquet(path) -> "TestSet":

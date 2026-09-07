@@ -31,7 +31,7 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from . import provenance, schema
+from . import atomic, provenance, schema
 
 TABLES = ("cells", "flips", "hist", "tests", "graphs", "levels", "cpdag")
 
@@ -116,10 +116,16 @@ class RunStore:
         tbl = schema.validate(tbl, table)
         path = self.shard_path(table, cell_digest)
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".parquet.tmp")
+        if path.exists():
+            # Already written, by an earlier run or by a concurrent worker. The path is
+            # content-addressed -- the digest covers the code, the config and the cell --
+            # so an existing shard holds equivalent bytes and rewriting it would only
+            # create a race. A code change produces a different digest, so this can never
+            # silently reuse a stale result.
+            return path
+        tmp = atomic.tmp_sibling(path)
         pq.write_table(tbl, tmp, compression="zstd")
-        tmp.replace(path)
-        return path
+        return atomic.finalize(tmp, path)
 
     def write_testset(self, ts) -> Path:
         """Immutable and content-addressed: if it already exists, it is already correct."""

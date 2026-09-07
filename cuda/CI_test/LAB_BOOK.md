@@ -137,9 +137,9 @@ distinct from numeric perturbation. That is E2.4's measurement, already recorded
 
 ### What this does not yet answer
 
-E3.2 (does autocorrelation push work into levels ≥ 2?) needs **cascade mode**, which is
-not built. Under the current α = 1.0 / complete-graph device the per-level test counts are
-fixed by construction, so the level distribution cannot shift. Gate G3 stays open.
+E3.2 (does autocorrelation push work into levels ≥ 2?) needs cascade mode, which is now
+built — the `levels` table records per-level test counts for every cascade cell. The
+experiment itself has not been run, so gate G3 stays open.
 
 
 ## E2.1 — amplification (contribution C1)  ⚠️ NEGATIVE RESULT, gate G2
@@ -336,6 +336,76 @@ directions — a graph with any is **not a valid CPDAG**. FP64 itself has 570 (D
 (VAR), so conflicts are a property of PC on an imperfect skeleton, not of precision. But
 they grow with precision loss (VAR: 2 → 282 at E5M2), which is worth reporting as its own
 degradation channel.
+
+
+## External implementations — what the reference GPU code actually does
+
+Read, not built. The decision is to reproduce cuPC's two parallelisation strategies in an
+engine where precision is a parameter, rather than depend on code whose precision is fixed
+at compile time. Sources checked 2026-09-07.
+
+**cuPC** — `https://github.com/LIS-Laboratory/cupc`, GPL-3.0, last push 2021-03-19.
+GitHub ships only **cuPC-S**; **cuPC-E exists only in the original artifact zip** at
+`http://lis.ee.sharif.edu/pub/2020_tpds_zjhs_cupc/cupc.zip` (the site's HTTPS certificate
+is expired — plain HTTP works).
+
+**1. It is `double` throughout, with no way to change it.** No typedef, no `#define`, no
+template parameter, no build flag:
+```c
+__global__ void cal_Indepl0(double *C, int *G, double th, double *pMax, int n);
+extern "C" void Skeleton(double* C, int *P, int *G, double *Th, int *l,
+                         int *maxlevel, double *pMax, int* SepSet);
+```
+A float variant would be a mass `double`→`float` edit across ~200 KB of kernel source.
+**This is the citable fact for §1**, and it is stronger than the proposal assumes: the
+reference implementation did not weigh the precision choice, it hard-coded FP64.
+
+**2. It computes Fisher-z with the NAIVE form, and inconsistently between levels.** No
+`log1p`, no `atanh`, no `normcdf`, no `erfc` appear anywhere in the source:
+```c
+// level 0 and levels >= 2 -- the ratio form
+res = abs( 0.5 * log( abs ( (1 + res) / (1 - res) ) ) );
+// level 1 -- the difference-of-logs form
+Z   = fabs( 0.5 * (log(fabs((1 + rho))) - log(fabs(1 - rho))) );
+```
+The two are **not bitwise identical**, so cuPC's level-1 and level-≥2 statistics have
+different rounding behaviour *by construction*. Both forms are already factors in
+`stats.py` (`z_naive`, `z_log1p`), so E0.3 can put a number on what that costs.
+
+**3. No p-value is ever computed on device.** cuPC compares |Z| against a per-level
+threshold precomputed in R — independent convergence on the same "store the statistic,
+threshold post hoc" design this harness uses. Its `pMax` output is raw |Z|, *not* on a
+p-value scale, despite pcalg documenting that slot as one.
+
+**4. Two apparent bugs in the R driver, both decision-changing and unrelated to precision.**
+(a) `threshold[i] <- ...` starting at `i = 0` is a silent no-op in R, so `Th[level]` ends
+up `|qnorm(α/2)|/sqrt(n − level − 4)` rather than `sqrt(n − level − 3)` — **every level is
+tested against the next level's threshold**. (b) The sepset index reconstruction
+(`y <- floor(i/p)+1; x <- i-((y-1)*p)+1`) inverts the mapping incorrectly. Neither is
+execution-verified here; both are read from source. This is direct support for E0.3's
+thesis that implementation variance exceeds dtype variance.
+
+**5. GPUCSL** (`hpi-epic/gpucsl`, MIT, on PyPI, last push 2022-11-23) is a cleaned-up
+cuPC-S with template-based levels — and it carries a live unexamined precision choice. All
+CI math is `double`, but the z accumulator is `float`: `float *zmin`, and
+`write_atomic_minimum(&zmin[...], (float)Z)`. Its reported p-values therefore derive from
+a **float32** statistic. It also reproduces cuPC's threshold off-by-one faithfully, so
+**cross-checking cuPC against GPUCSL would not expose it — only pcalg would.**
+
+**6. TF32 is irrelevant to both.** Neither links cuBLAS or cuSOLVER; all linear algebra is
+hand-written in-kernel. TF32 matters only for our own torch-based engine, which does go
+through cuBLAS. Per NVIDIA, `CUBLAS_DEFAULT_MATH` does *not* use TF32 for FP32 (it
+promises at least the requested mantissa bits), and `NVIDIA_TF32_OVERRIDE=0` is a
+library-wide kill switch worth setting explicitly in the GPU job.
+
+**7. CUDA Math API ULP bounds** (Programming Guide §5.5 — the Math API pages themselves
+just point at it): `normcdf` 5, `log1p` 1, `log` 1, `sqrt` 0, `atanh` 2, `erfc` 5 (double).
+Relevant to E0.2 arm (a): a device-side p-value via `normcdf` would cost 5 ULP, whereas the
+`log1p` route to atanh costs 1.
+
+**Licensing.** cuPC is GPL-3.0, GPUCSL is MIT; combining them in one distributed artifact
+would make the whole thing GPL-3. Read-and-reproduce takes neither as a dependency, so the
+question does not arise — but it must not be forgotten if that ever changes.
 
 ## Gate status
 

@@ -7,10 +7,14 @@
     python -m precision_pc cells configs/x.yaml    # list cell digests  (HPC fan-out)
     python -m precision_pc run-cell configs/x.yaml <digest>   # one cell (HPC fan-out)
 
-`cells` and `run-cell` are the entire interface the eventual cluster fan-out needs: a
-work-stealing array task loops over `cells`, claims one, and calls `run-cell`. No Backend
-abstraction is required, because cells are content-addressed and a shard's existence
-means done.
+`cells` and `run-cell` are the entire interface the cluster fan-out needs from the SCIENCE
+side: a work-stealing array task loops over cells, claims one, computes it. That works
+because cells are content-addressed and a shard's existence means done -- no completion
+protocol, no partitioning, no shared state.
+
+The `hpc` group is the TRANSPORT around that, and it does define a Backend -- not because
+the fan-out needs the abstraction, but because a second implementation of it (`mock`) is
+what lets the whole submit -> poll -> fetch loop be tested on a laptop with no cluster.
 
 Exit codes: 0 ok, 1 local/config error, 2 a gate or check failed, 3 work still pending.
 """
@@ -282,7 +286,23 @@ def main(argv=None) -> int:
     p.add_argument("run_id")
     p.set_defaults(fn=cmd_report)
 
+    # Imported lazily: the core commands must work on a machine with no cluster config,
+    # no ssh client and no network, so the transport is never pulled in for `doctor`.
+    from precision_pc.hpc import cli_hpc
+
+    cli_hpc.add_subparsers(sub)
+
     a = ap.parse_args(argv)
+
+    # An unhandled traceback out of the cluster path is the most likely place for a
+    # hostname or account to leak into a log, so scrub them before anything can print.
+    try:
+        from precision_pc.hpc.config import install_excepthook
+
+        install_excepthook()
+    except Exception:  # noqa: BLE001 -- the cluster layer is optional
+        pass
+
     try:
         return a.fn(a)
     except Exception as exc:  # noqa: BLE001
@@ -291,6 +311,28 @@ def main(argv=None) -> int:
         if isinstance(exc, GateFailed):
             print("gate failed: %s" % exc, file=sys.stderr)
             return 2
+        try:
+            from precision_pc.hpc.errors import (
+                AuthRequired, ConfigInvalid, ConfigMissing, HpcError,
+                JobFailed, JobPending, ProvenanceMismatch, ResultsIncomplete,
+            )
+        except Exception:  # noqa: BLE001
+            HpcError = ()  # type: ignore
+        else:
+            # JobPending is CONTROL FLOW, not failure: "still queued" has to be
+            # distinguishable from "broken" by a script that polls.
+            if isinstance(exc, JobPending):
+                print("pending: %s" % exc)
+                return 3
+            if isinstance(exc, (ConfigMissing, ConfigInvalid, AuthRequired)):
+                print("error: %s" % exc, file=sys.stderr)
+                return 1
+            if isinstance(exc, (JobFailed, ProvenanceMismatch, ResultsIncomplete)):
+                print("failed: %s" % exc, file=sys.stderr)
+                return 2
+            if isinstance(exc, HpcError):
+                print("error: %s" % exc, file=sys.stderr)
+                return 1
         print("error: %s: %s" % (type(exc).__name__, exc), file=sys.stderr)
         return 1
 

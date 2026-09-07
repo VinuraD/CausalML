@@ -236,9 +236,9 @@ def save(root, rec: GateRecord) -> Path:
         except Exception:
             db = {}
     db[_key(rec.code_digest, rec.env_digest, rec.hostname)] = rec.as_dict()
-    tmp = p.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(db, indent=2), encoding="utf-8")
-    tmp.replace(p)
+    from . import atomic
+
+    atomic.write_text(p, json.dumps(db, indent=2))
     return p
 
 

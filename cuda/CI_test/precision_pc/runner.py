@@ -59,6 +59,10 @@ DEFAULTS = {
     "max_level": 3,
     "stable_variants": [True],
     "stop_at_first": True,
+    # Cluster fan-out. Lives here rather than only in HpcConfig because
+    # `load_config` rejects unknown keys, so a value that never appears in DEFAULTS
+    # can never reach the remote worker -- it would silently keep the default.
+    "reclaim_after_s": 3600,
 }
 
 

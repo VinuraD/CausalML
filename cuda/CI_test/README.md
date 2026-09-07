@@ -3,9 +3,9 @@
 Harness for *Precision Requirements for GPU-Accelerated Constraint-Based Causal
 Discovery* (`precision_causal_discovery_proposal.pdf`).
 
-**Status: Tiers 0-2 (incl. orientation) plus E3.1, E4.1 and E4.2 run locally, 138 tests green.** No HPC
-code yet, by design — the proposal's gate G0 says nothing downstream is interpretable
-until the noise floor is provably zero, so that had to come first.
+**Status: Tiers 0-2 (incl. orientation) plus E3.1, E4.1, E4.2, and the cluster fan-out.
+171 tests green, none of which needs a cluster or a GPU.** Tier 5 and the GPU engine are
+not built yet.
 
 ```powershell
 conda activate causal
@@ -105,8 +105,38 @@ proportional rate — there is no fragile channel. This is the pre-registered ne
 outcome §6 asks for. (A ratio-of-percentages figure quoted earlier in development was
 invalid — different denominators over different populations; see `LAB_BOOK.md`.)
 
+## Running it on a cluster
+
+```
+python -m precision_pc hpc init          # write ~/.precision-pc/hpc.toml
+python -m precision_pc hpc doctor        # no network: config, ssh, key, TTY
+python -m precision_pc hpc preflight     # ONE connection, one second-factor prompt
+python -m precision_pc hpc stage         # build the remote venv on a login node
+python -m precision_pc hpc submit configs/e1_kappa.yaml
+python -m precision_pc hpc status  e1_kappa      # exit 3 while queued
+python -m precision_pc hpc fetch   e1_kappa
+python -m precision_pc report      e1_kappa
+```
+
+The fan-out is a **work-stealing pull**, not a static partition: every array task runs the
+same worker, claims the next unclaimed cell via `os.link`, computes it, writes its shard.
+Cell costs vary by orders of magnitude — an FP8 cell hits the pseudo-inverse fallback on
+most tests — so a fixed `k::N` split would leave most tasks idle. It also decouples task
+count from cell count, so `--array=0-15%8` is a pure throughput knob and `MaxArraySize` is
+never a limit.
+
+Every design choice in the transport exists to spend fewer **connections**, because on an
+MFA cluster a connection costs an interactive second factor: submit is two connections,
+everything else is one, and `status` returns progress, queue state and a log excerpt from
+a single probe.
+
+`mock` is a second backend that runs the real worker as local subprocesses against a fake
+cluster directory. The whole submit → poll → fetch loop, the claim protocol and the
+provenance check are therefore tested on a laptop; only SSH transport and SLURM itself
+are not.
+
 ## Not built yet
 
-Orientation (v-structures + Meek rules) to turn the sepset divergence into a CPDAG-level
-number, E3.2's level-distribution shift, E4.3/E4.4, Tier 5, and the HPC fan-out. The only
-affordance the cluster needs is `cells` + `run-cell`, and both exist.
+Tier 5 and the GPU engine, E3.2's level-distribution shift, and E4.3/E4.4. The TF32
+rounding mode also remains uncalibrated — see `LAB_BOOK.md` §7 — because the local Pascal
+card has no TF32 at all, so every TF32 number is still marked provisional.

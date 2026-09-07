@@ -216,7 +216,8 @@ def write_manifest(path, config: dict | None = None, extra: dict | None = None) 
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     m = manifest(config, extra)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(m, indent=2, default=str), encoding="utf-8")
-    tmp.replace(path)
+    # Every array task calls RunStore.init(), so this is written concurrently.
+    from . import atomic
+
+    atomic.write_text(path, json.dumps(m, indent=2, default=str))
     return m
