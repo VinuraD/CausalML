@@ -188,3 +188,60 @@ def test_level_shares_sum_to_one():
     C, n, _, _ = _instance()
     r = skeleton.discover(C, n, 0.01, max_level=3)
     assert sum(r.level_shares().values()) == pytest.approx(1.0)
+
+
+# ======================================== the wave-batched fast path (5-7x on cascade)
+@pytest.mark.parametrize("stop_at_first", [True, False])
+@pytest.mark.parametrize("fmt", ["float64", "float8_e4m3"])
+def test_wave_batching_is_exactly_equal_to_the_loop(stop_at_first, fmt):
+    """Batching the skeleton search is only safe if it executes the SAME tests.
+
+    The search short-circuits, and the executed trajectory is a recorded OUTPUT -- it
+    feeds union-replay and E3.2's level counts. Naively batching every candidate would
+    evaluate tests the loop never reaches and inflate that record. So candidates are
+    evaluated in waves: wave k takes the k-th candidate of every still-live edge, and the
+    trajectory is re-sorted into the loop's edge-major order, so even the digest matches.
+    """
+    C, n, _, _ = _instance(n_vars=14)
+    a = skeleton.discover(C, n, 0.01, fmt=fmt, max_level=3,
+                          stop_at_first=stop_at_first, batched=False)
+    b = skeleton.discover(C, n, 0.01, fmt=fmt, max_level=3,
+                          stop_at_first=stop_at_first, batched=True)
+    assert a.edge_set() == b.edge_set()
+    assert a.sepsets == b.sepsets, "a different separating set was recorded"
+    assert a.trajectory.digest() == b.trajectory.digest(), "the trajectory changed"
+    assert a.stat.tobytes() == b.stat.tobytes()
+    assert (a.status == b.status).all()
+    assert a.level_counts == b.level_counts
+
+
+def test_order_dependent_pc_is_not_batched():
+    """With stable=False a removal takes effect immediately, so an edge removed early
+    changes the candidate sets of edges considered after it. Evaluating a wave across
+    edges would reorder exactly that dependency, so the order-dependent variant keeps the
+    loop -- E2.2 compares the two, so both have to stay exact."""
+    C, n, _, _ = _instance(n_vars=12)
+    a = skeleton.discover(C, n, 0.01, stable=False, batched=False)
+    b = skeleton.discover(C, n, 0.01, stable=False, batched=True)
+    assert a.edge_set() == b.edge_set()
+    assert a.trajectory.digest() == b.trajectory.digest()
+
+
+def test_candidate_order_matches_the_loop():
+    """Which candidate is reached FIRST decides which separating set is recorded, and
+    sepsets determine v-structures hence orientation (E2.3)."""
+    import numpy as _np
+
+    from precision_pc import skeleton_batch
+
+    adj = _np.ones((6, 6), dtype=bool)
+    _np.fill_diagonal(adj, False)
+    got = skeleton_batch.candidates_for(adj, 0, 1, 1)
+    expected = [s for a, b in ((0, 1), (1, 0))
+                for s in [(k,) for k in range(6) if k not in (a, b)]]
+    seen, want = set(), []
+    for s in expected:
+        if s not in seen:
+            seen.add(s)
+            want.append(s)
+    assert got == want

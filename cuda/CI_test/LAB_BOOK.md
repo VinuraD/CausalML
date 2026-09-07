@@ -594,6 +594,43 @@ degenerate.
 per-test loop. Replay-mode configs get the full speedup; cascade gets it only in the
 union-replay arm. That is the next obvious target.
 
+
+## Cascade mode is batched too — 5-7x, and exactly equal
+
+`skeleton.discover` also looped per test, so cascade mode did not benefit from the engine
+batching. It now processes each level in **waves**: wave k evaluates the k-th candidate of
+every still-live edge in one batched call, and edges that accept drop out before wave k+1.
+
+| N | tests | loop | wave-batched | speedup |
+|---|---|---|---|---|
+| 15 | 997 | 0.113 s | 0.0215 s | 5.2× |
+| 25 | 2 353 | 0.273 s | 0.0467 s | 5.8× |
+| 40 | 5 114 | 0.591 s | 0.1013 s | 5.8× |
+| 60 | 13 124 | 1.790 s | 0.2425 s | 7.4× |
+
+End to end, `configs/e2_1_amplification.yaml` (210 cells) went from about six minutes to
+**43.7 s**. Less than the engine's 31–41× because `stop_at_first` resolves most edges in
+the first wave or two, so the batches shrink quickly — the win comes from batching across
+*edges*, and there are only so many waves.
+
+**Why waves rather than batching every candidate.** The search short-circuits, and the
+executed trajectory is a recorded OUTPUT: it feeds union-replay and E3.2's level counts.
+Evaluating every candidate at once would run tests the loop never reaches and inflate that
+record — changing results, not just timing. Waves execute exactly the same tests in the
+same quantity; only the evaluation order differs, and the trajectory is re-sorted into the
+loop's edge-major order so even its digest matches.
+
+**Order-dependent PC is deliberately not batched.** With `stable=False` a removal takes
+effect immediately, so an edge removed early changes the candidate sets of edges
+considered after it — and a wave across edges reorders exactly that dependency. E2.2
+compares the two variants, so both must stay exact; that path keeps the loop.
+
+Verified equal on 16 combinations (4 datasets × 2 formats × both `stop_at_first`) for
+edges, separating sets, trajectory digest, `stat` bytes, statuses and level counts. And
+re-running `e2_1_amplification` after the change reproduced **every per-format total
+exactly** — same flips, edge changes, sepset divergence and trajectory sizes as the
+pre-batching run.
+
 ## Gate status
 
 | gate | test | status |

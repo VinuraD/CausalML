@@ -50,7 +50,8 @@ from typing import Dict, Optional, Tuple
 
 import numpy as np
 
-from . import checks, corr, formats, parcorr, stats, testset
+from . import batched as batched_mod
+from . import checks, corr, formats, parcorr, skeleton_batch, stats, testset
 
 
 @dataclass
@@ -112,6 +113,7 @@ def discover(
     allow_pinv: bool = True,
     keep_unit_diagonal: bool = True,
     check: bool = True,
+    batched: bool = True,
 ) -> SkeletonResult:
     """Run PC skeleton discovery at one precision, recording the whole trajectory."""
     C = np.ascontiguousarray(C, dtype=np.float64)
@@ -151,6 +153,31 @@ def discover(
             break
         # PC-stable snapshots the adjacency; order-dependent PC reads the live one.
         adj_ref = adj.copy() if stable else adj
+
+        # Wave-batched fast path. Only for PC-stable: with stable=False a removal takes
+        # effect immediately, so an edge removed early changes the candidate sets of
+        # edges considered after it, and evaluating a wave across edges would reorder
+        # exactly that dependency. E2.2 compares the two variants, so both stay exact.
+        if batched and stable and variant in batched_mod.BATCHABLE:
+            recs, removals, any_cand = skeleton_batch.run_level(
+                Cr, adj, adj_ref, level,
+                n_obs=n_obs, crit=crit, variant=variant, ztransform=ztransform,
+                rcond=rcond, allow_pinv=allow_pinv, stop_at_first=stop_at_first,
+            )
+            for (i, j, S, sv, stv, kpv, mdv) in recs:
+                tri.append((i, j, S))
+                st_l.append(sv)
+                status_l.append(stv)
+                kap_l.append(kpv)
+                md_l.append(mdv)
+                level_counts[len(S)] = level_counts.get(len(S), 0) + 1
+            for (i, j), S in removals:
+                sepsets[(i, j)] = tuple(S)
+                adj[i, j] = adj[j, i] = False
+            if any_cand:
+                max_level_reached = level
+                continue
+            break
         edges = [(i, j) for i in range(N) for j in range(i + 1, N) if adj[i, j]]
         if not edges:
             break
