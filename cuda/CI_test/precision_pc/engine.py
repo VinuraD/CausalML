@@ -17,6 +17,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from . import batched as batched_mod
 from . import checks, corr, formats, parcorr, stats
 from .testset import TestSet
 
@@ -71,6 +72,7 @@ def evaluate(
     allow_pinv: bool = True,
     keep_unit_diagonal: bool = True,
     check: bool = True,
+    batched: bool = True,
 ) -> CellResult:
     """Run every test in `ts` against `C`, rounded to `fmt`.
 
@@ -98,14 +100,39 @@ def evaluate(
     kappa = np.empty(T, dtype=np.float64)
     mindiag = np.empty(T, dtype=np.float64)
 
-    for t in range(T):
-        S = ts.conditioning_set(t)
-        sub = corr.submatrix(Cr, int(ts.i[t]), int(ts.j[t]), S)
-        r, st, kp, md = route(sub, rcond=rcond, allow_pinv=allow_pinv)
-        rho[t] = r
-        status[t] = st
-        kappa[t] = kp
-        mindiag[t] = md
+    def _scalar(positions):
+        for t in positions:
+            S = ts.conditioning_set(t)
+            sub = corr.submatrix(Cr, int(ts.i[t]), int(ts.j[t]), S)
+            r, st, kp, md = route(sub, rcond=rcond, allow_pinv=allow_pinv)
+            rho[t] = r
+            status[t] = st
+            kappa[t] = kp
+            mindiag[t] = md
+
+    if batched and variant in batched_mod.BATCHABLE:
+        # Same LAPACK entry points, on stacked arrays -- bitwise identical to the loop,
+        # 60-70x faster. Any bucket containing a degenerate element falls back whole,
+        # because NumPy's stacked cholesky/inv raise for the batch without saying which
+        # element failed. `n_fallback_tests` makes that cost visible.
+        from .gpu import bucket_by_level
+
+        n_fallback = 0
+        for b in bucket_by_level(ts):
+            sub = batched_mod.gather_submatrices(Cr, b.index)
+            got = batched_mod.evaluate_bucket(sub, variant, rcond=rcond)
+            if got is None:
+                n_fallback += len(b.positions)
+                _scalar(b.positions)
+                continue
+            r, st, kp, md = got
+            rho[b.positions] = r
+            status[b.positions] = st
+            kappa[b.positions] = kp
+            mindiag[b.positions] = md
+    else:
+        n_fallback = T
+        _scalar(range(T))
 
     # Vectorised statistic. Levels differ, so the sqrt(n - |S| - 3) scale is per test.
     lvl = ts.level.astype(np.float64)

@@ -208,3 +208,65 @@ def test_subsample_never_drops_a_flipped_or_degenerate_test():
     assert keep[[1, 7, 11]].all()
     assert keep[res.status != parcorr.OK].all()
     assert keep[np.isnan(res.stat)].all()
+
+
+# ============================================ the batched fast path (31-41x speedup)
+@pytest.mark.parametrize("variant", ["inv", "chol"])
+@pytest.mark.parametrize("fmt", ["float64", "float32", "bfloat16"])
+def test_batched_path_is_bitwise_identical_on_decision_fields(variant, fmt):
+    """The constraint that made batching safe to adopt.
+
+    `code_digest` covers the engine, so a change that moved any decision-bearing value by
+    one ulp would invalidate every cell already computed and force the E0.1 gate to be
+    re-established -- in exchange for throughput. So the fast path uses the SAME LAPACK
+    entry points on stacked arrays rather than a hand-rolled batched Cholesky, which would
+    change the summation order and therefore the last ulp.
+    """
+    C, ts, n = _setup(n_vars=14)
+    a = engine.evaluate(C, ts, n, fmt=fmt, variant=variant, batched=False)
+    b = engine.evaluate(C, ts, n, fmt=fmt, variant=variant, batched=True)
+    assert a.rho.tobytes() == b.rho.tobytes()
+    assert a.stat.tobytes() == b.stat.tobytes()
+    assert a.min_diag.tobytes() == b.min_diag.tobytes()
+    assert (a.status == b.status).all()
+
+
+def test_batched_kappa_proxy_agrees_to_within_one_ulp():
+    """The single field that is NOT bitwise identical, bounded and documented.
+
+    NumPy's stacked and 2-D Cholesky can differ in the last ulp for some matrices, which
+    reaches `kappa_proxy` through the factor's diagonal. It is a diagnostic -- binned by
+    log10 for E1.2, never used for a decision -- so a 1-ulp move cannot change a result.
+    Asserted rather than assumed, so a future change that widens it fails here.
+    """
+    C, ts, n = _setup(n_vars=16)
+    a = engine.evaluate(C, ts, n, batched=False)
+    b = engine.evaluate(C, ts, n, batched=True)
+    m = np.isfinite(a.kappa_proxy) & np.isfinite(b.kappa_proxy)
+    ulp = np.abs(a.kappa_proxy[m].view(np.int64) - b.kappa_proxy[m].view(np.int64))
+    assert ulp.max() <= 1, "kappa_proxy drifted by %d ulp" % ulp.max()
+
+
+def test_batched_falls_back_whole_bucket_on_degenerate_input():
+    """NumPy's stacked cholesky/inv raise for the WHOLE batch without saying which element
+    failed -- unlike torch's cholesky_ex. Rather than guess, the bucket falls back to the
+    scalar routes, which keeps the answer exactly right and gives up speed only where the
+    data is degenerate."""
+    rng = np.random.default_rng(0)
+    C = np.array(corr.correlation(rng.standard_normal((300, 8))))
+    C[1, 0] = C[0, 1] = 1.0  # exact duplicate pair -> singular submatrices
+    C = corr.symmetrise(C)
+    np.fill_diagonal(C, 1.0)
+    ts = T.level0(8)
+    a = engine.evaluate(C, ts, 300, batched=False)
+    b = engine.evaluate(C, ts, 300, batched=True)
+    assert (a.status == b.status).all()
+    assert a.rho.tobytes() == b.rho.tobytes()
+
+
+def test_unbatchable_route_still_works():
+    """`regression` has no batched implementation; it must silently use the loop."""
+    C, ts, n = _setup(n_vars=10)
+    a = engine.evaluate(C, ts, n, variant="regression", batched=True)
+    b = engine.evaluate(C, ts, n, variant="regression", batched=False)
+    assert a.rho.tobytes() == b.rho.tobytes()

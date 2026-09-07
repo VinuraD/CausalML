@@ -549,6 +549,51 @@ rounds every intermediate.
 0.2% at κ = 1e8. Same dtype, same conditioning, different route. Another direct
 confirmation of E0.3's thesis that the algorithm choice outweighs the dtype.
 
+
+## The engine is now batched — 31-41x, bitwise safe
+
+`engine.evaluate` looped over tests in Python. The same algorithm batched in NumPy:
+
+| N | level | tests | loop | batched | speedup |
+|---|---|---|---|---|---|
+| 20 | 1 | 3 420 | 0.424 s | 0.0114 s | 37× |
+| 45 | 1 | 42 570 | 5.776 s | 0.1395 s | 41× |
+| 60 | 1 | 102 660 | 13.898 s | 0.3492 s | 40× |
+| 16 | 2 | 10 920 | 1.549 s | 0.0490 s | 32× |
+
+End to end, `configs/e1_kappa.yaml` (35 cells) went from roughly two minutes to **8.8 s**.
+
+**The constraint was bitwise identity, not speed.** `code_digest` covers the engine, so a
+change moving any decision-bearing value by one ulp would invalidate every computed cell
+and force the E0.1 gate to be re-established — in exchange for throughput. So the fast
+path calls the SAME LAPACK entry points on stacked arrays (`np.linalg.cholesky`, `solve`,
+`inv` are gufuncs over the identical per-matrix kernel). A hand-rolled batched Cholesky
+would be faster still and would change the summation order, which is precisely the E0.3
+"route matters" axis — not a change to make silently for throughput.
+
+Verified across 42 combinations (iid and controlled-κ up to 1e12, levels 1–2, `inv` and
+`chol` routes, float64/float32/bfloat16):
+
+| field | agreement |
+|---|---|
+| `rho`, `stat`, `status`, `min_diag` | **bitwise identical everywhere** |
+| `kappa_proxy` | at most **1 ulp**, on ~1 element in 660 |
+
+The one field that moves is a diagnostic: `kappa_proxy` is binned by log10 for E1.2 and
+never enters a decision, so a 1-ulp move cannot change a result. The cause is that NumPy's
+stacked and 2-D Cholesky differ in the last ulp for some matrices — the same phenomenon as
+the numba-vs-numpy E0.3 finding, on yet another axis. It is asserted in the tests rather
+than assumed, so a future change that widens it fails loudly.
+
+Degenerate inputs fall back to the scalar routes for the whole bucket, because NumPy's
+stacked `cholesky`/`inv` raise for the entire batch without saying which element failed —
+unlike torch's `cholesky_ex`. Exactness is kept; speed is given up only where the data is
+degenerate.
+
+**Still unbatched: `skeleton.discover`**, which drives cascade mode and has its own
+per-test loop. Replay-mode configs get the full speedup; cascade gets it only in the
+union-replay arm. That is the next obvious target.
+
 ## Gate status
 
 | gate | test | status |
