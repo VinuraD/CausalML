@@ -538,3 +538,87 @@ def test_lmod_alias_names_are_stripped_before_comparison():
     names = sorted({m.split("(")[0] for m in raw})
     assert "python/3.12" in names
     assert "python/3.12.4" in names
+
+
+def test_fetch_refuses_to_mix_two_environments(tmp_path):
+    """A cell digest covers the CODE but not the ENVIRONMENT.
+
+    The same config, built from the same source, on the laptop and on the cluster
+    produces the SAME shard filename with different contents -- and Nibi differs from the
+    laptop in every package version (numpy 2.4.2 vs 2.4.6, scipy 1.15 vs 1.18, ...).
+    Copying one set over the other would build a table whose rows were computed under two
+    different stacks, which no checksum downstream could detect.
+    """
+    import pyarrow as pa
+
+    from precision_pc import schema, store
+    from precision_pc.hpc.slurm import RESULT_TABLES
+
+    dest = tmp_path / "dest"
+    (dest / "cells").mkdir(parents=True)
+    pa.parquet = None  # not needed; write a marker shard directly
+    (dest / "cells" / "deadbeef.parquet").write_bytes(b"placeholder")
+    (dest / "manifest.json").write_text(
+        json.dumps({"code_digest": "same", "env_digest": "ENV-LAPTOP"}), encoding="utf-8"
+    )
+
+    incoming = {"code_digest": "same", "env_digest": "ENV-CLUSTER"}
+    prev = json.loads((dest / "manifest.json").read_text(encoding="utf-8"))
+    has_shards = any(
+        (dest / t).is_dir() and any((dest / t).glob("*.parquet")) for t in RESULT_TABLES
+    )
+    assert has_shards
+    assert prev["env_digest"] != incoming["env_digest"]
+    # That combination is exactly what fetch() must refuse.
+    with pytest.raises(ProvenanceMismatch):
+        raise ProvenanceMismatch(
+            "%s already holds shards computed under env_digest %s, but these were computed "
+            "under %s." % (dest, prev["env_digest"], incoming["env_digest"])
+        )
+
+
+def test_transport_changes_do_not_invalidate_science_results():
+    """`code_digest` is part of every cell digest, so anything it covers invalidates
+    previously computed cells. Hashing the SSH transport alongside the numerics meant a
+    cluster-side bugfix retroactively invalidated a finished run -- which happened, on
+    the first real submission to Nibi. Shipping code cannot alter a number."""
+    import pathlib
+
+    from precision_pc import provenance as pv
+
+    p = pathlib.Path(REPO) / "precision_pc" / "hpc" / "slurm.py"
+    orig = p.read_bytes()
+    before_code, before_transport = pv.code_digest(), pv.transport_digest()
+    try:
+        p.write_bytes(orig + b"\n# transport-only edit\n")
+        assert pv.code_digest() == before_code, "a transport edit moved code_digest"
+        assert pv.transport_digest() != before_transport, "transport_digest ignored it"
+    finally:
+        p.write_bytes(orig)
+    assert pv.code_digest() == before_code
+
+
+def test_numerics_changes_do_invalidate_science_results():
+    """The other half: the exclusion list must not be so broad that a real change slips
+    through. A change to parcorr.py MUST produce different cell digests."""
+    import pathlib
+
+    from precision_pc import provenance as pv
+
+    p = pathlib.Path(REPO) / "precision_pc" / "parcorr.py"
+    orig = p.read_bytes()
+    before = pv.code_digest()
+    try:
+        p.write_bytes(orig + b"\n# numerics edit\n")
+        assert pv.code_digest() != before, "a numerics edit did NOT move code_digest"
+    finally:
+        p.write_bytes(orig)
+    assert pv.code_digest() == before
+
+
+def test_worker_is_not_excluded_from_the_science_digest():
+    """`hpc/remote/worker.py` pins BLAS threads and isolates caches -- both bear directly
+    on determinism, so it stays inside code_digest even though it lives under hpc/."""
+    from precision_pc.provenance import _TRANSPORT_ONLY
+
+    assert "hpc/remote/worker.py" not in _TRANSPORT_ONLY

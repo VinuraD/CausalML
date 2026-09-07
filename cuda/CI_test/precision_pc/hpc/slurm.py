@@ -488,6 +488,32 @@ class SlurmBackend(Backend):
                         % (theirs[:16], mine[:16])
                     )
 
+                # The code digest is not enough. A cell digest covers the CODE but not the
+                # ENVIRONMENT, so the same config built by the same source on two machines
+                # produces the SAME shard filename with different contents -- and the
+                # cluster and the laptop differ in every package version. Copying one over
+                # the other would silently build a table whose rows were computed under two
+                # different numpy builds, which no checksum downstream could detect.
+                existing = dest / "manifest.json"
+                if existing.exists() and not allow_stale:
+                    prev = json.loads(existing.read_text(encoding="utf-8"))
+                    prev_env = prev.get("env_digest", "")
+                    new_env = m.get("env_digest", "")
+                    has_shards = any(
+                        (dest / t).is_dir() and any((dest / t).glob("*.parquet"))
+                        for t in RESULT_TABLES
+                    )
+                    if has_shards and prev_env and new_env and prev_env != new_env:
+                        raise ProvenanceMismatch(
+                            "%s already holds shards computed under env_digest %s, but these "
+                            "were computed under %s. Cell digests cover the code, not the "
+                            "environment, so these shards share filenames while holding "
+                            "results from two different package stacks -- merging them would "
+                            "produce a table nobody could interpret. Fetch into a separate "
+                            "run directory instead."
+                            % (dest, prev_env[:16], new_env[:16])
+                        )
+
             copied = 0
             for table in RESULT_TABLES + ("testsets",):
                 src = staged / table

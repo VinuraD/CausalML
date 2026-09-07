@@ -455,11 +455,50 @@ mounted identically on the compute nodes, so both `preflight` and `stage.sh` now
 logical `pwd`: absolute, because SLURM expands neither `~` nor `$VARS` in `#SBATCH`
 directives, but not symlink-resolved.
 
+
+## Cross-machine agreement at matched precision — first real measurement
+
+`configs/e0_noise_floor.yaml`, FP64, 3 seeds, 2340 level-0 tests, run twice: once on Nibi
+(job 21298780, x86_64 Linux, numpy 2.4.2) and once on the laptop (AMD64 Windows, numpy
+2.4.6), then joined per test on `(seed, level, test_idx)`.
+
+| quantity | result |
+|---|---|
+| bitwise identical | **no** |
+| max abs difference in `stat` | 4.44e-15 |
+| max relative difference | 7.18e-13 |
+| max abs difference in `rho` | 1.94e-16 |
+| **decision flips at α ∈ {0.001, 0.01, 0.05}** | **0 / 2340** |
+| status codes agreeing | all 2340 |
+
+**The same pattern as the E0.3 implementation finding, on a new axis.** Two machines
+differing in CPU architecture, operating system, BLAS build and numpy version disagree at
+the ULP level on essentially every test, and agree on every single decision. Ubiquitous
+numerical disagreement, invisible at the decision level.
+
+Two things follow.
+
+**This is the CPU-vs-CPU baseline that E0.2 needs.** E0.2 asks whether GPU and CPU agree
+at matched precision. Before attributing any disagreement to the device, it has to be
+compared against the disagreement two *CPUs* already show — which is now measured, not
+assumed. Anything at or below ~1e-13 relative is within the cross-machine floor.
+
+**It settles whether cluster and laptop results may be pooled: they may not.** Cell
+digests cover the code but not the environment, so the same config on both machines
+produces the same shard filename with different contents. `fetch` now refuses to merge
+into a directory holding shards from a different `env_digest`; that guard was written from
+principle and is now justified by measurement.
+
+Caveat, stated plainly: this is level 0 on i.i.d. Gaussian data, so κ ≈ 1 and every
+statistic sits far from the threshold. It is the easy regime. Whether cross-machine
+agreement survives at high κ and higher levels is exactly the question E0.2 must ask, and
+this run does not answer it.
+
 ## Gate status
 
 | gate | test | status |
 |---|---|---|
-| G0 | E0.1 noise floor | ✅ zero, cross-process, with a working anti-control |
+| G0 | E0.1 noise floor | ✅ zero, cross-process, with a working anti-control — and independently re-established on Nibi (job 21298780), where `array.sbatch` runs the gate on the compute node before any worker starts |
 | G1 | flips at FP32 and TF32 | ✅ does not fire — TF32 reaches 0.28% at φ=0.99, 1.5% at level 2. FP32 clean in every regime reachable so far. |
 | G2 | amplification ≈ 1 | ⚠️ **fires.** Every count-based ratio is O(1) or below (0.004–2.5). C1 is not supported in any channel. Pre-registered negative result. |
 | G3 | time-series stays in levels 0–1 | still open — needs cascade mode, not just VAR data |

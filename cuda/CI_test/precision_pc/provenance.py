@@ -43,22 +43,69 @@ def digest_obj(obj: Any) -> str:
 
 
 # ------------------------------------------------------------------- code digest
+#: Modules that can only move results around, never change one.
+#:
+#: The split matters in practice: `code_digest` is part of every cell digest, so anything
+#: inside it invalidates previously computed cells. Hashing the SSH transport alongside
+#: the numerics meant that fixing a cluster bug retroactively invalidated a finished run
+#: -- which happened, on the first real submission. Shipping code cannot alter a number.
+#:
+#: The line is drawn at "could a change here alter a computed value?", and drawn
+#: CONSERVATIVELY. `hpc/remote/worker.py` is deliberately NOT excluded: it pins BLAS
+#: threads and isolates caches, both of which bear directly on determinism.
+_TRANSPORT_ONLY = (
+    "cli.py",
+    "__main__.py",
+    "hpc/__init__.py",
+    "hpc/cli_hpc.py",
+    "hpc/claim.py",
+    "hpc/config.py",
+    "hpc/errors.py",
+    "hpc/mock.py",
+    "hpc/slurm.py",
+    "hpc/ssh.py",
+)
+
+
+def _iter_sources(transport: bool):
+    for q in sorted(_PKG.rglob("*.py")):
+        if "__pycache__" in q.parts:
+            continue
+        rel = str(q.relative_to(_PKG)).replace(os.sep, "/")
+        if (rel in _TRANSPORT_ONLY) == transport:
+            yield rel, q
+
+
+def _digest_sources(transport: bool) -> str:
+    h = hashlib.sha256()
+    for rel, q in _iter_sources(transport):
+        h.update(rel.encode("utf-8"))
+        h.update(b"\0")
+        h.update(q.read_bytes().replace(b"\r\n", b"\n"))
+        h.update(b"\0")
+    return h.hexdigest()
+
+
 def code_digest() -> str:
-    """SHA-256 over every .py file in the package, by relative path and content.
+    """SHA-256 over every .py file that can affect a computed result.
 
     Hashing the source rather than trusting the git SHA is deliberate: the working tree
     is usually dirty during development, and a result computed from uncommitted code must
     not silently claim the provenance of the last commit.
+
+    Excludes `_TRANSPORT_ONLY`; see the note there. Line endings are normalised so a
+    Windows checkout and a Linux one agree.
     """
-    h = hashlib.sha256()
-    for p in sorted(_PKG.rglob("*.py")):
-        if "__pycache__" in p.parts:
-            continue
-        h.update(str(p.relative_to(_PKG)).replace(os.sep, "/").encode("utf-8"))
-        h.update(b"\0")
-        h.update(p.read_bytes().replace(b"\r\n", b"\n"))
-        h.update(b"\0")
-    return h.hexdigest()
+    return _digest_sources(transport=False)
+
+
+def transport_digest() -> str:
+    """SHA-256 over the shipping code: CLI, SSH, scheduler, claim protocol.
+
+    Recorded in every manifest so nothing is lost, but deliberately NOT part of a cell
+    digest and NOT checked on fetch -- a change here cannot alter a number.
+    """
+    return _digest_sources(transport=True)
 
 
 # -------------------------------------------------------------------- git status
@@ -199,6 +246,7 @@ def manifest(config: dict | None = None, extra: dict | None = None) -> dict:
         "schema_version": 1,
         "created_utc": _dt.datetime.now(_dt.timezone.utc).isoformat(),
         "code_digest": code_digest(),
+        "transport_digest": transport_digest(),
         "env_digest": env_digest(),
         "git": git_info(),
         "env": env_info(),
