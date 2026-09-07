@@ -1,7 +1,7 @@
 #!/bin/bash
 # Run ONCE on a LOGIN NODE, and again whenever dependencies change.
 #
-#   bash stage.sh <remote_root> <modules>
+#   bash stage.sh <remote_root> <modules> [force] [with_torch]
 #
 # Compute nodes have no outbound internet; login nodes do. So everything the jobs need
 # must be resolved here first:
@@ -17,6 +17,7 @@ set -uo pipefail
 ROOT=${1:?usage: stage.sh <remote_root> <modules>}
 MODULES=${2:?}
 FORCE=${3:-}
+WITH_TORCH=${4:-}
 
 # A leading ~ arrives here as a LITERAL character: the path came in as an argv element and
 # is used as "$ROOT", and bash only expands tildes on unquoted literals at parse time.
@@ -73,6 +74,9 @@ pip install --no-index --upgrade pip >/dev/null 2>&1 || true
 modname () { case "$1" in PyYAML) echo yaml ;; *) echo "$1" ;; esac; }
 
 PKGS="numpy scipy numba pyarrow pandas PyYAML threadpoolctl ml_dtypes"
+# torch only when asked: the CPU array jobs never import it, and it is a large
+# install. Tier 5 (TF32 calibration, E5.1 throughput) needs it.
+if [ "${WITH_TORCH:-}" = "1" ]; then PKGS="$PKGS torch"; fi
 MISSING=""
 for p in $PKGS; do
   m=$(modname "$p")

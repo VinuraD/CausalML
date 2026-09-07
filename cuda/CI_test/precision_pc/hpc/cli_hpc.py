@@ -148,15 +148,18 @@ def cmd_preflight(a) -> int:
 
     print("\npython modules")
     mods = info.get("python_modules") or []
-    print("  %s" % (", ".join(mods) if mods else "(none matched python/3*)"))
+    # Lmod renders an alias as "python/3.12(@python/3.12.4)". The bare name IS loadable,
+    # so compare against the stripped form or every alias reads as missing.
+    names = sorted({m.split("(")[0] for m in mods})
+    print("  %s" % (", ".join(names) if names else "(none matched python/3*)"))
     want = cfg.hpc.modules.split()[0] if cfg.hpc.modules else ""
-    if want and mods and want not in mods:
-        print("  WARNING: configured module %r is not in that list; `hpc stage` would fail" % want)
+    if want and names and want not in names:
+        print("  WARNING: configured module %r is not loadable; `hpc stage` would fail" % want)
 
     if info.get("wheels"):
         print("\nwheelhouse (compute nodes have no internet, so anything missing here must")
         print("be downloaded on the login node by stage.sh)")
-        for line in info["wheels"].splitlines()[:14]:
+        for line in info["wheels"].splitlines()[:40]:
             print("  %s" % line)
 
     if info.get("quota"):
@@ -174,9 +177,13 @@ def cmd_preflight(a) -> int:
 
 def cmd_stage(a) -> int:
     be, cfg = _backend(a)
+    if a.with_torch:
+        print("staging WITH torch (Tier 5 needs it; the CPU array jobs do not)")
     print("staging on a login node -- this takes several minutes")
     try:
-        out = be.stage(force=a.force)
+        # Passed as an argument, not an environment variable: env set on the client does
+        # not cross the SSH boundary into the remote shell.
+        out = be.stage(force=a.force, with_torch=a.with_torch)
     finally:
         be.close()
     print(out.get("log", ""))
@@ -262,6 +269,71 @@ def cmd_reports(a) -> int:
     return 0
 
 
+def cmd_submit_gpu(a) -> int:
+    be, cfg = _backend(a)
+    try:
+        out = be.submit_gpu(a.run_id)
+    finally:
+        be.close()
+    print("%s GPU job %s (%s)" % (out["action"], out["jobid"], out["job_name"]))
+    print("  charged to the _gpu association, not the CPU one")
+    print("\nCheck with: python -m precision_pc hpc status %s" % a.run_id)
+    print("Then:       python -m precision_pc hpc gpu-report --run-id %s" % a.run_id)
+    return 0
+
+
+def cmd_gpu_report(a) -> int:
+    be, cfg = _backend(a)
+    try:
+        rep = be.fetch_gpu_report(a.run_id)
+    finally:
+        be.close()
+    if rep is None:
+        print("no report yet -- the job has not finished writing gpu_report.json")
+        return 3
+
+    d = rep.get("device", {})
+    print("device      %s  (sm_%s, %s SMs)" % (
+        d.get("device_name"), "".join(map(str, d.get("capability", []))), d.get("sm_count")))
+
+    c = rep.get("tf32_calibration", {})
+    print("\nTF32 calibration")
+    if not c.get("ran"):
+        print("  skipped: %s" % c.get("reason") or c.get("error"))
+    else:
+        print("  device rounds      : %s" % c.get("device_mode"))
+        print("  harness assumes    : %s" % c.get("harness_assumes"))
+        print("  exact agreement    : %s" % _ok(c.get("exact")))
+        print("  ties in the sample : %s of %s" % (c.get("n_ties"), c.get("n_values")))
+        for m in ("rne", "rna", "trunc"):
+            if ("frac_" + m) in c:
+                print("    %-6s matches %.4f" % (m, c["frac_" + m]))
+        if c.get("assumption_holds"):
+            print("  -> every TF32 number in LAB_BOOK can drop its provisional caveat")
+        else:
+            print("  -> the harness assumes the WRONG rounding mode; TF32 results need redoing")
+
+    t = rep.get("throughput", {})
+    if "rows" in t:
+        print("\nE5.1 throughput")
+        print("  FP64:FP32 time ratio = %s" % t.get("fp64_fp32_ratio"))
+        print("  %-20s %-10s %-9s %10s %14s" % ("backend", "dtype", "batch", "tests", "tests/s"))
+        for r in t["rows"]:
+            if "tests_per_s" not in r:
+                print("  %-20s %-10s %-9s  ERROR %s" % (
+                    r.get("backend"), r.get("dtype"), r.get("batch_size"),
+                    str(r.get("error"))[:60]))
+                continue
+            print("  %-20s %-10s %-9s %10d %14.0f" % (
+                r["backend"], r["dtype"], str(r["batch_size"]), r["n_tests"], r["tests_per_s"]))
+
+    dd = rep.get("device_determinism", {})
+    if dd:
+        print("\ndevice reproducible against itself: %s (%s flips)"
+              % (_ok(dd.get("bitwise_identical")), dd.get("flips")))
+    return 0
+
+
 # ------------------------------------------------------------------ registration
 def add_subparsers(sub) -> None:
     """Attach the `hpc` group to the main parser."""
@@ -284,7 +356,17 @@ def add_subparsers(sub) -> None:
 
     p = hsub.add_parser("stage", help="build the remote venv on a login node")
     p.add_argument("--force", action="store_true", help="rebuild the venv from scratch")
+    p.add_argument("--with-torch", action="store_true",
+                   help="also install torch, which only Tier 5 needs")
     p.set_defaults(fn=cmd_stage)
+
+    p = hsub.add_parser("submit-gpu", help="submit the Tier 5 GPU job (TF32 + E5.1)")
+    p.add_argument("--run-id", default="tier5")
+    p.set_defaults(fn=cmd_submit_gpu)
+
+    p = hsub.add_parser("gpu-report", help="print the Tier 5 report")
+    p.add_argument("--run-id", default="tier5")
+    p.set_defaults(fn=cmd_gpu_report)
 
     p = hsub.add_parser("submit", help="push code and config, submit the array job")
     p.add_argument("config")

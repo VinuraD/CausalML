@@ -35,7 +35,7 @@ class Backend(abc.ABC):
         """Prove we can reach the cluster and report its environment. One connection."""
 
     @abc.abstractmethod
-    def stage(self, *, force: bool = False) -> dict:
+    def stage(self, *, force: bool = False, with_torch: bool = False) -> dict:
         """Prepare the remote environment. Login node only; needs internet."""
 
     @abc.abstractmethod

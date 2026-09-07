@@ -192,7 +192,7 @@ class SlurmBackend(Backend):
         }
 
     # --------------------------------------------------------------------- stage
-    def stage(self, *, force: bool = False) -> dict:
+    def stage(self, *, force: bool = False, with_torch: bool = False) -> dict:
         """Run stage.sh on the LOGIN node, streamed.
 
         Login nodes have outbound internet; compute nodes do not. So the venv and any
@@ -204,7 +204,9 @@ class SlurmBackend(Backend):
         self._push_code()
         script = (REMOTE_DIR / "stage.sh").read_text(encoding="utf-8")
         rc, out = self.ssh.run_script(
-            script, [root, self.hpc.modules, "force" if force else ""], scrub=False
+            script,
+            [root, self.hpc.modules, "force" if force else "", "1" if with_torch else ""],
+            scrub=False,
         )
         text = REDACTOR.scrub(out)
         if rc != 0:
@@ -327,6 +329,67 @@ class SlurmBackend(Backend):
         self._save_state(run_id, digest, jobid)
         return {"jobid": jobid, "action": action, "job_name": name,
                 "run_dir": rundir, "digest": digest}
+
+    def submit_gpu(self, run_id: str = "tier5") -> dict:
+        """Submit the Tier 5 GPU job: TF32 calibration and E5.1 throughput.
+
+        A single task on one GPU, not an array. Unlike the CPU fan-out this is not
+        embarrassingly parallel -- it measures ONE device, and extra tasks would only
+        contend for it. Charged to the _gpu association: Alliance splits the allocation,
+        and the CPU account is rejected at sbatch time.
+        """
+        from .. import provenance
+
+        if self._root is None:
+            self.preflight()
+        root = self._require_root()
+        rundir = self.remote_run_dir(run_id)
+        digest = self.run_digest({"job": "tier5"}, provenance.code_digest())
+        name = self.job_name(run_id, digest)
+
+        self._push_code()
+        sbatch = self.render_sbatch(run_id, digest, template="gpu_job.sbatch")
+        with tempfile.TemporaryDirectory() as td:
+            sb = Path(td) / "gpu_job.sbatch"
+            sb.write_bytes(lf(sbatch))
+            staging = "%s/.ppc-gpu-%s.sbatch" % (root, digest[:12])
+            self.ssh.push(sb, staging)
+
+        script = "\n".join([
+            "set -eu",
+            'JD="%s"' % rundir,
+            'mkdir -p "$JD/logs"',
+            "mv '%s' \"$JD/gpu_job.sbatch\"" % staging,
+            'J=$(squeue -h -u "$USER" -n "%s" -o %%i 2>/dev/null | head -1)' % name,
+            'if [ -z "$J" ]; then',
+            '  J=$(cd "$JD" && sbatch --parsable gpu_job.sbatch); echo "NEW $J"',
+            'else echo "REATTACH $J"; fi',
+        ])
+        rc, out = self.ssh.run_script(script, scrub=False)
+        if rc != 0:
+            raise JobFailed("gpu sbatch failed (rc=%d): %s" % (rc, REDACTOR.scrub(out)[-1500:]))
+        parts = out.strip().split()
+        jobid = parts[-1] if parts else ""
+        if not jobid.split("_")[0].isdigit():
+            raise JobFailed("could not read a job id from sbatch output: %r" % parts[:6])
+        self._save_state(run_id, digest, jobid)
+        return {"jobid": jobid, "action": "reattached" if "REATTACH" in out else "submitted",
+                "job_name": name, "run_dir": rundir, "digest": digest}
+
+    def fetch_gpu_report(self, run_id: str = "tier5") -> Optional[dict]:
+        """Pull the Tier 5 JSON report. Small, so it comes back inside one connection."""
+        rundir = self.remote_run_dir(run_id)
+        rc, out = self.ssh.run_script(
+            'f="%s/gpu_report.json"; [ -f "$f" ] && base64 -w0 "$f" || true' % rundir,
+            scrub=False,
+        )
+        blob = out.strip()
+        if rc != 0 or not blob:
+            return None
+        try:
+            return json.loads(base64.b64decode(blob))
+        except Exception:
+            return None
 
     # -------------------------------------------------------------------- status
     def status(self, run_id: str) -> dict:

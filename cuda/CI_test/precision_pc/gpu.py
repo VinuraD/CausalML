@@ -284,3 +284,160 @@ def _parcorr_batch(sub, m: int):
         kappa.double().cpu().numpy(),
         dmin.double().cpu().numpy(),
     )
+
+
+# ============================================================== TF32 calibration (B3)
+#: Values chosen to sit exactly on TF32 rounding ties, where `rne` and `rna` differ.
+#: A tie is a value whose dropped 13 mantissa bits are exactly 0x1000.
+def tf32_tie_cases(n: int = 4096) -> np.ndarray:
+    """float32 values lying exactly on a TF32 rounding tie, plus ordinary values.
+
+    Ties are the only place round-to-nearest-EVEN and round-to-nearest-AWAY differ, so a
+    calibration built from random floats would pass under either rule and prove nothing.
+    """
+    rng = np.random.default_rng(0)
+    # Construct exact ties: arbitrary sign/exponent/high-mantissa, dropped bits = 0x1000.
+    hi = rng.integers(0, 1 << 19, size=n, dtype=np.uint32) << np.uint32(13)
+    expo = rng.integers(100, 150, size=n, dtype=np.uint32) << np.uint32(23)
+    sign = rng.integers(0, 2, size=n, dtype=np.uint32) << np.uint32(31)
+    ties = (sign | expo | (hi & np.uint32(0x007FE000)) | np.uint32(0x1000)).view(np.float32)
+    ordinary = rng.uniform(-1, 1, n).astype(np.float32)
+    x = np.concatenate([ties, ordinary])
+    return x[np.isfinite(x)]
+
+
+def calibrate_tf32(x: Optional[np.ndarray] = None) -> dict:
+    """Compare this harness's simulated TF32 against the device's real one.
+
+    `LAB_BOOK` §7 records that PTX exposes both `cvt.rn.tf32.f32` (nearest-even) and
+    `cvt.rna.tf32.f32` (nearest, ties away), that which one a toolkit emits has varied,
+    and that `formats.to_tf32` therefore ASSUMES `rne`. Every TF32 number in this study is
+    provisional until that assumption is checked against hardware.
+
+    The device's rounding is extracted by multiplying by the identity with TF32 enabled:
+    the tensor core converts each input to TF32 before the multiply, and multiplying by
+    one leaves exactly that rounded value.
+    """
+    import torch
+
+    info = device_info()
+    if not info.get("cuda_available"):
+        return {"ran": False, "reason": "no CUDA device"}
+    if not info.get("has_tf32_hardware"):
+        return {
+            "ran": False,
+            "reason": "device is sm_%d%d; TF32 tensor cores need sm_80+"
+            % tuple(info["capability"]),
+            "device": info.get("device_name"),
+        }
+
+    x = tf32_tie_cases() if x is None else np.asarray(x, dtype=np.float32)
+    prev = torch.backends.cuda.matmul.allow_tf32
+    try:
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.set_float32_matmul_precision("high")
+        t = torch.as_tensor(x, dtype=torch.float32, device="cuda")
+        eye = torch.eye(t.numel(), dtype=torch.float32, device="cuda")
+        device_rounded = (t.unsqueeze(0) @ eye).squeeze(0).cpu().numpy()
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = prev
+
+    out = {
+        "ran": True,
+        "device": info.get("device_name"),
+        "capability": info.get("capability"),
+        "n_values": int(x.size),
+        "n_ties": int(((x.view(np.uint32) & np.uint32(0x1FFF)) == np.uint32(0x1000)).sum()),
+    }
+    for mode in ("rne", "rna", "trunc"):
+        ours = formats.to_tf32(x, mode=mode).astype(np.float32)
+        agree = int(np.sum(ours == device_rounded))
+        out["match_" + mode] = agree
+        out["frac_" + mode] = float(agree / x.size)
+    best = max(("rne", "rna", "trunc"), key=lambda m: out["frac_" + m])
+    out["device_mode"] = best
+    out["exact"] = out["frac_" + best] == 1.0
+    out["harness_assumes"] = "rne"
+    out["assumption_holds"] = bool(best == "rne" and out["exact"])
+    return out
+
+
+# ================================================================= E5.1 throughput
+def throughput(
+    n_vars: int = 60,
+    n_obs: int = 500,
+    level: int = 1,
+    dtypes=("float64", "float32"),
+    batch_sizes=(None,),
+    reps: int = 3,
+    include_cpu: bool = True,
+) -> List[dict]:
+    """E5.1. Per-format throughput, plus the batched-NumPy baseline on the same machine.
+
+    Two quantities are reported and must never be conflated. The **within-device
+    FP64:FP32 ratio** is architecture-dependent and normalised, so it is meaningful even
+    on a small part -- it is what supports "FP64 is nearly free on a datacenter card and
+    crippling on a consumer one". **Absolute throughput** needs a real card and says
+    nothing on a 2-SM laptop GPU.
+
+    Timings are reported with and without host-device transfer, following the SSDBM
+    reporting precedent.
+    """
+    import time
+
+    import torch
+
+    from . import corr as _corr
+    from . import engine as _engine
+    from . import testset as _T
+
+    rng = np.random.default_rng(0)
+    C = _corr.correlation(rng.standard_normal((n_obs, n_vars)))
+    adj = np.ones((n_vars, n_vars), dtype=bool)
+    np.fill_diagonal(adj, False)
+    ts = _T.from_adjacency(adj, level)
+    rows: List[dict] = []
+
+    def timeit(fn):
+        fn()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        for _ in range(reps):
+            fn()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        return (time.perf_counter() - t0) / reps
+
+    if include_cpu:
+        t = timeit(lambda: _engine.evaluate(C, ts, n_obs, fmt="float64", variant="chol"))
+        rows.append({
+            "backend": "cpu_batched_numpy", "dtype": "float64", "batch_size": None,
+            "n_tests": len(ts), "seconds": t, "tests_per_s": len(ts) / t,
+        })
+
+    if available():
+        for dt in dtypes:
+            for bs in batch_sizes:
+                try:
+                    t = timeit(lambda: evaluate(C, ts, n_obs, compute_dtype=dt, batch_size=bs))
+                except Exception as exc:  # noqa: BLE001 -- e.g. bf16 on pre-Ampere
+                    rows.append({"backend": "gpu", "dtype": dt, "batch_size": bs,
+                                 "n_tests": len(ts), "error": repr(exc)[:200]})
+                    continue
+                rows.append({
+                    "backend": "gpu", "dtype": dt, "batch_size": bs,
+                    "n_tests": len(ts), "seconds": t, "tests_per_s": len(ts) / t,
+                })
+    return rows
+
+
+def fp64_fp32_ratio(rows: List[dict]) -> Optional[float]:
+    """The normalised, architecture-dependent number E5.1 actually needs.
+
+    Meaningful even on a small device, because it divides out the SM count.
+    """
+    g = {r["dtype"]: r for r in rows if r.get("backend") == "gpu" and "seconds" in r}
+    if "float64" not in g or "float32" not in g:
+        return None
+    return g["float64"]["seconds"] / g["float32"]["seconds"]

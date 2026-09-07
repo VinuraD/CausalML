@@ -53,7 +53,7 @@ class MockBackend(Backend):
             "note": "no cluster contacted; this backend fakes one on the local filesystem",
         }
 
-    def stage(self, *, force: bool = False) -> dict:
+    def stage(self, *, force: bool = False, with_torch: bool = False) -> dict:
         (self.root / "code").mkdir(parents=True, exist_ok=True)
         return {"staged": True, "root": str(self.root), "note": "mock: nothing to install"}
 

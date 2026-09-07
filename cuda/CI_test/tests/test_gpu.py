@@ -140,3 +140,70 @@ def test_batching_does_not_change_the_answer():
     whole = gpu.evaluate(C, ts, n, compute_dtype="float64")
     split = gpu.evaluate(C, ts, n, compute_dtype="float64", batch_size=97)
     assert metrics.is_bitwise_identical(whole, split)
+
+
+# ============================================== Tier 5: calibration and the GPU job
+def test_tf32_tie_cases_actually_contain_ties():
+    """A calibration built from random floats would pass under EITHER rounding rule and
+    prove nothing. Ties -- values whose dropped 13 mantissa bits are exactly 0x1000 -- are
+    the only place nearest-even and nearest-away differ."""
+    x = gpu.tf32_tie_cases(1024)
+    dropped = x.view(np.uint32) & np.uint32(0x1FFF)
+    assert int((dropped == np.uint32(0x1000)).sum()) > 500, "no ties in the sample"
+    assert np.all(np.isfinite(x))
+
+
+def test_calibration_refuses_on_pre_ampere_rather_than_guessing():
+    """TF32 tensor cores need sm_80+. On older silicon the result would be a fallback,
+    not a TF32 measurement, so the calibration must decline rather than report a number."""
+    out = gpu.calibrate_tf32()
+    assert isinstance(out, dict)
+    if not out.get("ran"):
+        assert "reason" in out
+    else:
+        assert out["device_mode"] in ("rne", "rna", "trunc")
+        assert "assumption_holds" in out
+
+
+def test_throughput_reports_a_cpu_baseline():
+    """The CPU baseline must be the batched implementation, not a per-test loop -- the
+    paper plan calls a strawman baseline out by name, and measuring against the loop once
+    produced a 75x figure that a fair comparison turned into 0.56x."""
+    rows = gpu.throughput(n_vars=12, level=1, reps=1, dtypes=("float64",))
+    cpu = [r for r in rows if r["backend"] == "cpu_batched_numpy"]
+    assert len(cpu) == 1
+    assert cpu[0]["tests_per_s"] > 0
+
+
+def test_fp64_fp32_ratio_is_none_without_both():
+    assert gpu.fp64_fp32_ratio([{"backend": "gpu", "dtype": "float64", "seconds": 1.0}]) is None
+
+
+def test_gpu_sbatch_renders_and_charges_the_gpu_account(tmp_path):
+    """Alliance splits the allocation. Charging the GPU job to the _cpu association is
+    rejected at sbatch time -- after the queue accepted it, and after a second factor."""
+    import re
+
+    from precision_pc.hpc.config import Config, HpcConfig
+    from precision_pc.hpc.slurm import SlurmBackend
+
+    cfg = Config(hpc=HpcConfig(host="h", user="u", account="def-x_cpu",
+                               gpu_account="def-x_gpu", remote_root="/r", gpus="h100:1"))
+    be = SlurmBackend(cfg)
+    be._root = "/r"
+    t = be.render_sbatch("tier5", "abc", template="gpu_job.sbatch")
+    assert not re.findall(r"@[A-Z_]+@", t)
+    assert "\r" not in t
+    assert "#SBATCH --account=def-x_gpu" in t
+    assert "#SBATCH --gpus-per-node=h100:1" in t
+    # ... while the CPU array template still charges the CPU association.
+    assert "#SBATCH --account=def-x_cpu" in be.render_sbatch("run", "abc")
+
+
+def test_gpu_job_script_ships():
+    from precision_pc.hpc import slurm
+
+    for name in ("gpu_job.sbatch", "gpu_job.py"):
+        p = slurm.REMOTE_DIR / name
+        assert p.exists(), "%s missing" % name
+    assert b"\r" not in (slurm.REMOTE_DIR / "gpu_job.sbatch").read_bytes()
