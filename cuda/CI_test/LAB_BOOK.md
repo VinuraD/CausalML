@@ -631,6 +631,94 @@ re-running `e2_1_amplification` after the change reproduced **every per-format t
 exactly** — same flips, edge changes, sepset divergence and trajectory sizes as the
 pre-batching run.
 
+
+## E0.2 restructured — and the answer is a well-attributed null
+
+The proposal expects cross-device disagreement at α=0.01 "where implementations diverge
+most", and hoped it might be "possibly the strongest single result". It is not, and there
+is now a quantitative reason why rather than an impression.
+
+### Arm A — the transcendental, with ρ held identical
+
+Where does implementation disagreement actually live?
+
+| stat | p (erfc) | p (ndtr) | relative disagreement | |
+|---|---|---|---|---|
+| 2.5758 | 1.0001e-02 | 1.0001e-02 | **7.8e-15** | ← α = 0.01 |
+| 3.2900 | 1.0019e-03 | 1.0019e-03 | **2.2e-15** | ← α = 0.001 |
+| 8.0 | 1.2442e-15 | 1.3323e-15 | **7.1e-02** | |
+| 10.0 | 1.5240e-23 | 0 | 1.0 | |
+
+**Thirteen orders of magnitude apart.** The region where normal-tail implementations
+disagree (stat ≳ 8, p < 1e-15) is disjoint from the region where decisions are marginal.
+Run as specified, E0.2 measures a difference that cannot reach a threshold.
+
+And CUDA's transcendentals are not the problem the proposal supposes. Against numpy's
+`log1p`, on 20 200 values including |r| → 1, statistic scaled to n = 4000:
+
+| implementation | max \|Δstat\| | max relative | flips at α=0.01 |
+|---|---|---|---|
+| `log1p` CUDA | 1.14e-13 | 3.47e-16 | **0** |
+| `atanh` CUDA | 1.14e-13 | 4.03e-16 | **0** |
+| `log1p` torch CPU | 5.68e-14 | 3.80e-16 | **0** |
+| naive `log((1+r)/(1-r))` | 1.14e-13 | **2.31e-12** | 0 |
+
+CUDA agrees with numpy to 4e-16. The largest disagreement in the table is not the device
+at all — it is the *naive z-transform formula*, at 2.3e-12, six orders worse than the
+device difference. E0.3's thesis again.
+
+### Arm B — the linear algebra, with the transform held identical
+
+Every backend forms the statistic the same way (host-side float64 `log1p`), so any
+difference is summation order, FMA contraction, or the device. `gpu.evaluate` was written
+for this: it computes ρ on the device but the statistic on the host.
+
+| regime | backend | max\|Δρ\| | max\|Δstat\| | flips@.01 | amp observed | amp predicted |
+|---|---|---|---|---|---|---|
+| iid N=16 | inv | 5.6e-17 | 1.3e-15 | 0 | 6.4e1 | 2.3e1 |
+| iid N=16 | **gpu** | 1.4e-17 | 8.9e-16 | 0 | 6.4e1 | 2.3e1 |
+| VAR φ=0.99 | inv | 4.4e-16 | 1.1e-12 | 0 | 4.9e3 | 4.7e3 |
+| VAR φ=0.99 | **gpu** | 3.0e-15 | 1.6e-12 | 0 | 4.7e3 | 4.7e3 |
+| factor load=.999 | inv | 1.6e-12 | 1.0e-10 | 0 | 4.9e4 | 4.9e4 |
+| factor load=.999 | **gpu** | 2.2e-12 | 1.4e-10 | 0 | 4.9e4 | 4.9e4 |
+
+Three things.
+
+**The amplification mechanism is confirmed.** `amp observed` tracks the analytic
+prediction √(n−k−3)/(1−r²) across four orders of magnitude. A ρ perturbation is amplified
+into the statistic exactly as `atanh`'s derivative says it should be, which is why |r| → 1
+is the danger zone — and why the α=0.01 *tail* was the wrong place to look.
+
+**The GPU is not special.** Its disagreement with the CPU reference is the same order as
+`inv` versus `chol` on the same CPU. "GPU and CPU disagree at identical precision" is
+true, and unremarkable: it is the magnitude two CPU routes already show.
+
+**Zero flips everywhere**, even at max\|Δstat\| = 1.4e-10. A statistic would have to land
+within 1e-10 of the threshold, which across ~10⁴ tests essentially never happens.
+
+### The mechanism, isolated
+
+How far one ulp of ρ travels, n = 4000:
+
+| r | sensitivity | Δstat per ulp |
+|---|---|---|
+| 0.0 | 6.3e1 | 1.4e-14 |
+| 0.99 | 3.2e3 | 3.4e-13 |
+| 0.9999 | 3.2e5 | 3.5e-11 |
+| 1 − 1e-8 | 3.2e9 | 3.5e-07 |
+
+Seven orders of amplification between r = 0 and near-duplicate variables — the same
+`1/(1−r)` structure that governs submatrix conditioning, reappearing in the transform.
+
+### What to report
+
+**Cross-device reproducibility is not a problem for constraint-based causal discovery at
+FP64.** Disagreement exists and is measurable, it grows exactly as the analytic
+sensitivity predicts, and it never reaches a decision. The restructuring is what makes
+that a finding rather than a null: the naive framing would have reported "no effect at
+α=0.01" without being able to say whether that was because the effect is absent or
+because the experiment looked in the wrong place.
+
 ## Gate status
 
 | gate | test | status |
