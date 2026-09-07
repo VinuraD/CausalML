@@ -407,6 +407,54 @@ Relevant to E0.2 arm (a): a device-side p-value via `normcdf` would cost 5 ULP, 
 would make the whole thing GPL-3. Read-and-reproduce takes neither as a dependency, so the
 question does not arise — but it must not be forgotten if that ever changes.
 
+
+## Cluster environment of record — Nibi, staged 2026-09-07
+
+`nibi.alliancecan.ca`, `/home/vinurad/scratch/precision-pc`, `module load python/3.12.4 arrow`.
+
+| package | laptop | Nibi |
+|---|---|---|
+| python | 3.12.13 | 3.12.4 |
+| numpy | 2.4.6 | 2.4.2 |
+| scipy | 1.15.3 | **1.18.1** |
+| numba | 0.67.0 | 0.65.1 |
+| pyarrow | 25.0.1 | 25.0.0 |
+| pandas | 2.3.3 | **3.0.5** |
+| ml_dtypes | 0.6.0 | 0.5.4 |
+| threadpoolctl | 3.6.0 | 3.6.0 |
+
+**Every one of these is in `env_digest`, so the two machines cannot share an E0.1 gate
+record and `array.sbatch` re-establishes the noise floor on the compute node before
+computing anything.** That is the correct behaviour, not a workaround: a compute node is
+genuinely a different environment, and a floor measured on the laptop says nothing there.
+
+Consequence to state in the paper: cluster and laptop results are **not** guaranteed
+bitwise identical. `test_results_are_reproducible_between_cluster_and_laptop` proves
+agreement only for a *matched* environment. Whether the two agree in practice is now an
+empirical question with a recorded answer, which is better than an assumption.
+
+pandas crosses a major version (2.3 → 3.0), but the compute path never imports it — the
+worker writes shards through pyarrow, and pandas appears only in `cli.cmd_report`, which
+runs locally after `fetch`. So the major bump cannot affect any computed number.
+
+### Two Alliance-specific facts worth recording
+
+**pyarrow is deliberately blocked from pip.** `avail_wheels pyarrow` reports version
+`9999`, Alliance's sentinel for "do not install this from pip"; the PyPI fallback then
+fails with `from versions: none` because their patched pip (`26.1.2+computecanada`)
+applies a constraints file on top of `PIP_CONFIG_FILE`. The supported route is
+`module load arrow`, which supplies pyarrow 25.0.0. Two consequences for the harness: the
+staging loop must test importability *before* trying pip, or the sentinel reads as a real
+failure; and the venv must be built `--system-site-packages`, or a module-provided package
+is invisible inside it no matter which modules are loaded.
+
+**`~/scratch` is a symlink.** `pwd -P` resolves it to `/scratch/<user>/...`, which is a
+different path string from the `/home/<user>/scratch/...` that the job script bakes in.
+Same inode, so it happens to work — but the physical target is not guaranteed to be
+mounted identically on the compute nodes, so both `preflight` and `stage.sh` now use
+logical `pwd`: absolute, because SLURM expands neither `~` nor `$VARS` in `#SBATCH`
+directives, but not symlink-resolved.
+
 ## Gate status
 
 | gate | test | status |

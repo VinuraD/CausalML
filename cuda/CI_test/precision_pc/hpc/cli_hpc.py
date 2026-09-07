@@ -130,8 +130,45 @@ def cmd_preflight(a) -> int:
     finally:
         if not a.keep_open:
             be.close()
-    for k, v in info.items():
-        print("  %-14s %s" % (k, v))
+
+    print("\ncluster")
+    for k in ("backend", "login_node", "root", "venv_present", "max_array_size"):
+        print("  %-18s %s" % (k, info.get(k)))
+
+    print("\naccounting")
+    accts = info.get("accounts") or []
+    print("  %-18s %s" % ("accounts", ", ".join(accts) if accts else "(none reported)"))
+    print("  %-18s %s" % ("default", info.get("default_account") or "(none)"))
+    valid = info.get("configured_account_valid")
+    print("  %-18s %s" % ("configured account",
+                          {True: "valid", False: "NOT IN THE LIST", None: "could not verify"}[valid]))
+    if valid is False:
+        print("    The account in your config is not among your associations. sbatch would")
+        print("    reject the job after the queue accepted it -- fix hpc.account first.")
+
+    print("\npython modules")
+    mods = info.get("python_modules") or []
+    print("  %s" % (", ".join(mods) if mods else "(none matched python/3*)"))
+    want = cfg.hpc.modules.split()[0] if cfg.hpc.modules else ""
+    if want and mods and want not in mods:
+        print("  WARNING: configured module %r is not in that list; `hpc stage` would fail" % want)
+
+    if info.get("wheels"):
+        print("\nwheelhouse (compute nodes have no internet, so anything missing here must")
+        print("be downloaded on the login node by stage.sh)")
+        for line in info["wheels"].splitlines()[:14]:
+            print("  %s" % line)
+
+    if info.get("quota"):
+        print("\nquota")
+        for line in info["quota"].splitlines()[:10]:
+            print("  %s" % line)
+
+    parts = info.get("partitions") or []
+    print("\npartitions  %d available" % len(parts))
+    if not cfg.hpc.partition:
+        print("  partition is unset, which is correct on Alliance clusters: SLURM routes by")
+        print("  the requested walltime, and naming a bucket by hand only narrows the pool.")
     return 0
 
 

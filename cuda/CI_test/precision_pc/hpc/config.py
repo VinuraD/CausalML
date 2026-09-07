@@ -115,6 +115,12 @@ class HpcConfig:
     account: str = ""
     remote_root: str = ""
 
+    #: Alliance clusters split the allocation by resource type -- `def-<pi>_cpu` and
+    #: `def-<pi>_gpu` are separate associations, and charging a CPU array job to the GPU
+    #: account is rejected at sbatch time. Empty means "same as `account`", which is
+    #: correct on clusters that do not split.
+    gpu_account: str = ""
+
     ssh_exe: str = ""
     key_path: str = "~/.ssh/id_ed25519"
     known_hosts: str = "~/.ssh/known_hosts"
@@ -136,6 +142,12 @@ class HpcConfig:
 
     reclaim_after_s: int = 3600
     max_wait_s: int = 60
+
+    def account_for(self, gpu: bool) -> str:
+        """The association to charge. Falls back to `account` when no split exists."""
+        if gpu and self.gpu_account:
+            return self.gpu_account
+        return self.account
 
     def gpu_directive(self) -> str:
         if self.gpu_flavour == "gres":
@@ -253,7 +265,8 @@ backend = "slurm"          # slurm | mock
 [hpc]
 host        = ""           # REQUIRED, e.g. "nibi.alliancecan.ca"
 user        = ""           # REQUIRED
-account     = ""           # REQUIRED, e.g. "def-yourpi"
+account     = ""           # REQUIRED. On Alliance this is the CPU association,
+                           # e.g. "def-yourpi_cpu" -- check `hpc preflight` output.
 remote_root = ""           # REQUIRED, e.g. "~/scratch/precision-pc"
 
 key_path    = "~/.ssh/id_ed25519"
@@ -268,6 +281,9 @@ array     = "0-15%8"       # 16 workers, at most 8 running at once
 modules   = "python/3.12"
 
 # --- GPU job: Tier 5 throughput only -----------------------------------------
+# Alliance splits the allocation: a GPU job must be charged to the _gpu association,
+# not the _cpu one. Leave empty on clusters that do not split.
+gpu_account   = ""
 gpu_partition = ""
 gpus          = "h100:1"
 gpu_flavour   = "gpus-per-node"   # gres | gpus-per-node | gpus-per-task

@@ -501,3 +501,40 @@ def test_scripts_are_normalised_before_being_sent():
         assert out.splitlines() == ["one", "two"], out
     finally:
         sh.kill()
+
+
+# ================================== facts learned from a real cluster (Nibi, 2026-09-07)
+def test_allowance_split_routes_cpu_and_gpu_jobs_separately():
+    """Alliance splits an allocation into `def-<pi>_cpu` and `def-<pi>_gpu`.
+
+    Charging a CPU array job to the GPU association is rejected at sbatch time -- after
+    the queue accepted the submission, and after another second factor. Discovered by
+    `hpc preflight`, which reported exactly two associations and neither matching the
+    single account the config had inherited.
+    """
+    h = HpcConfig(account="def-x_cpu", gpu_account="def-x_gpu")
+    assert h.account_for(gpu=False) == "def-x_cpu"
+    assert h.account_for(gpu=True) == "def-x_gpu"
+    # Clusters that do not split leave gpu_account empty and must still work.
+    assert HpcConfig(account="def-y").account_for(gpu=True) == "def-y"
+
+
+def test_cpu_array_job_is_charged_to_the_cpu_association(tmp_path):
+    from precision_pc.hpc.slurm import SlurmBackend
+
+    cfg = Config(hpc=HpcConfig(host="h", user="u", account="def-x_cpu",
+                               gpu_account="def-x_gpu", remote_root="/r"))
+    be = SlurmBackend(cfg)
+    be._root = "/r"
+    line = [l for l in be.render_sbatch("d", "abc").splitlines()
+            if l.startswith("#SBATCH --account")][0]
+    assert line.endswith("def-x_cpu"), line
+
+
+def test_lmod_alias_names_are_stripped_before_comparison():
+    """Lmod renders an alias as `python/3.12(@python/3.12.4)`. Comparing the configured
+    module against the raw strings made a perfectly loadable module read as missing."""
+    raw = ["python/3.12(@python/3.12.4)", "python/3.12.4", "python/3.13(@python/3.13.2)"]
+    names = sorted({m.split("(")[0] for m in raw})
+    assert "python/3.12" in names
+    assert "python/3.12.4" in names

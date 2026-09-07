@@ -306,11 +306,12 @@ def main(argv=None) -> int:
     try:
         return a.fn(a)
     except Exception as exc:  # noqa: BLE001
-        from precision_pc.gate import GateFailed
-
-        if isinstance(exc, GateFailed):
-            print("gate failed: %s" % exc, file=sys.stderr)
-            return 2
+        # Order matters, and so does the guard. The cluster commands deliberately need
+        # nothing from the scientific stack -- `hpc doctor` and `hpc stage` must work on
+        # an interpreter with no numpy. Importing `gate` here (it imports numpy at module
+        # scope) made the HANDLER raise while reporting a failure, burying the real error
+        # under a ModuleNotFoundError. So: classify HPC errors first, and never let a
+        # missing optional import turn a clean message into a second traceback.
         try:
             from precision_pc.hpc.errors import (
                 AuthRequired, ConfigInvalid, ConfigMissing, HpcError,
@@ -318,7 +319,8 @@ def main(argv=None) -> int:
             )
         except Exception:  # noqa: BLE001
             HpcError = ()  # type: ignore
-        else:
+
+        if HpcError:
             # JobPending is CONTROL FLOW, not failure: "still queued" has to be
             # distinguishable from "broken" by a script that polls.
             if isinstance(exc, JobPending):
@@ -333,6 +335,15 @@ def main(argv=None) -> int:
             if isinstance(exc, HpcError):
                 print("error: %s" % exc, file=sys.stderr)
                 return 1
+
+        try:
+            from precision_pc.gate import GateFailed
+        except ImportError:
+            pass  # no scientific stack here, so it cannot have been a gate failure
+        else:
+            if isinstance(exc, GateFailed):
+                print("gate failed: %s" % exc, file=sys.stderr)
+                return 2
         print("error: %s: %s" % (type(exc).__name__, exc), file=sys.stderr)
         return 1
 

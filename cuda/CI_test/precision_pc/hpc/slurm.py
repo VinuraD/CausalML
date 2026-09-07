@@ -119,10 +119,11 @@ class SlurmBackend(Backend):
     def preflight(self) -> dict:
         """One connection. Proves auth, resolves the remote root, reports the environment.
 
-        `pwd -P` resolves `~` and `$SCRATCH` ONCE, here. SLURM does not expand either
-        inside `#SBATCH` directives -- an `--output` of `~/x/...` creates a directory
-        literally named `~` -- so every path baked into the job script must already be
-        absolute.
+        Resolves `~` and `$SCRATCH` to an absolute path ONCE, here, because SLURM
+        expands neither inside `#SBATCH` directives -- an `--output` of `~/x/...` creates
+        a directory literally named `~`. Uses logical `pwd` rather than `pwd -P`: the
+        result must be absolute, but resolving the ~/scratch symlink to its physical
+        target risks a path that is not mounted the same way on the compute nodes.
         """
         raw = _safe(self.hpc.remote_root, "remote_root")
         script = "\n".join([
@@ -131,14 +132,30 @@ class SlurmBackend(Backend):
             'echo "USER=$(whoami)"',
             'echo "SCRATCH=${SCRATCH:-}"',
             "mkdir -p %s 2>/dev/null || true" % raw,
-            "ROOT=$(cd %s 2>/dev/null && pwd -P)" % raw,
+            # `pwd`, not `pwd -P`. The path must be ABSOLUTE, because SLURM expands
+            # neither ~ nor $VARS inside #SBATCH directives -- an --output of ~/x/...
+            # creates a directory literally named "~". But it must NOT be symlink-
+            # resolved: on Alliance clusters ~/scratch is a symlink, and the physical
+            # /scratch/... target is not guaranteed to be mounted identically on the
+            # compute nodes. Logical pwd gives an absolute path that still travels
+            # through the documented location.
+            "ROOT=$(cd %s 2>/dev/null && pwd)" % raw,
             'echo "ROOT=${ROOT:-}"',
             'if [ -n "${ROOT:-}" ]; then mkdir -p "$ROOT/runs" "$ROOT/code"; fi',
             'echo "VENV=$( [ -d "${ROOT:-}/venv" ] && echo yes || echo no )"',
             'echo "SBATCH=$(command -v sbatch >/dev/null 2>&1 && echo yes || echo no)"',
             'echo "SQUEUE=$(command -v squeue >/dev/null 2>&1 && echo yes || echo no)"',
-            'echo "ACCOUNTS=$(sacctmgr -nP show user $USER format=Account 2>/dev/null | tr "\\n" "," )"',
-            'echo "PARTITIONS=$(sinfo -h -o %P 2>/dev/null | tr "\\n" "," )"',
+            'echo "ACCOUNTS=$(sacctmgr -nP show assoc user=$USER format=Account 2>/dev/null | sort -u | tr "\n" "," )"',
+            'echo "DEFACCT=$(sacctmgr -nP show user $USER format=DefaultAccount 2>/dev/null | tail -1)"',
+            'echo "PARTITIONS=$(sinfo -h -o %P 2>/dev/null | sort -u | tr "\n" "," )"',
+            # Below: facts the mock cluster cannot know. Each would otherwise surface
+            # as a failure minutes into staging, or after a queue wait.
+            'echo "MAXARRAY=$(scontrol show config 2>/dev/null | grep -i MaxArraySize | tr -d " " | cut -d= -f2)"',
+            'echo "PYMODULES=$(module -t avail python 2>&1 | grep -E "^python/3" | sort -u | tr "\n" "," )"',
+            'if command -v avail_wheels >/dev/null 2>&1; then',
+            '  echo "WHEELS=$(avail_wheels numpy scipy numba pyarrow pandas ml_dtypes threadpoolctl 2>/dev/null | base64 -w0)"',
+            'else echo "WHEELS="; fi',
+            'echo "QUOTA=$(diskusage_report 2>/dev/null | base64 -w0)"',
         ])
         # scrub=False: this output is PARSED. remote_root is a registered redaction value,
         # so scrubbing would turn ROOT into "***" and every derived path would be wrong.
@@ -158,13 +175,20 @@ class SlurmBackend(Backend):
         REDACTOR.add(root)
         if env.get("SBATCH") != "yes":
             raise HpcError("no `sbatch` on the remote PATH -- is this a SLURM cluster?")
+        accounts = [a for a in (env.get("ACCOUNTS") or "").split(",") if a]
         return {
             "backend": "slurm",
             "login_node": env.get("LOGIN"),
             "root": root,
             "venv_present": env.get("VENV") == "yes",
-            "accounts": [a for a in (env.get("ACCOUNTS") or "").split(",") if a],
+            "accounts": accounts,
+            "default_account": (env.get("DEFACCT") or "").strip(),
+            "configured_account_valid": (self.hpc.account in accounts) if accounts else None,
             "partitions": [p for p in (env.get("PARTITIONS") or "").split(",") if p],
+            "max_array_size": (env.get("MAXARRAY") or "?").strip(),
+            "python_modules": [m for m in (env.get("PYMODULES") or "").split(",") if m],
+            "wheels": _b64(env.get("WHEELS", "")),
+            "quota": _b64(env.get("QUOTA", "")),
         }
 
     # --------------------------------------------------------------------- stage
@@ -220,7 +244,11 @@ class SlurmBackend(Backend):
         t = (REMOTE_DIR / template).read_text(encoding="utf-8")
         repl = {
             "@JOBNAME@": self.job_name(run_id, digest),
-            "@ACCOUNT@": self.hpc.account,
+            # Alliance splits the allocation: a GPU job must be charged to the _gpu
+            # association. Charging the wrong one is rejected at sbatch time, after
+            # the queue wait and another second factor.
+            "@ACCOUNT@": self.hpc.account_for(gpu="gpu" in template),
+            "@GPU_ACCOUNT@": self.hpc.account_for(gpu=True),
             "@ARRAY@": self.hpc.array,
             "@CPUS@": str(self.hpc.cpus),
             "@MEM@": self.hpc.mem,
