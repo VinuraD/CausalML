@@ -5,3 +5,7 @@ runs/
 noise_floor.json
 .pytest_cache/
 figures/*.png
+
+# Client-side scheduler cache: job ids for this machine's submissions. Not science,
+# and the remote queue is the source of truth for it anyway.
+.state/
