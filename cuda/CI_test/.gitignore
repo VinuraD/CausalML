@@ -1,0 +1,7 @@
+__pycache__/
+*.nbi
+*.nbc
+runs/
+noise_floor.json
+.pytest_cache/
+figures/*.png

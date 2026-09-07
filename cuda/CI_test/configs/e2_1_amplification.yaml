@@ -1,0 +1,29 @@
+# E2.1 / E2.3 / E2.4 / E4.1 -- the core result. Cascade mode.
+#
+# Amplification = edges_changed / n_union_flip:
+#   numerator   from the free-running cascade (each format runs its own search)
+#   denominator from replaying the UNION of every format's trajectory, the only test set
+#               on which a flip rate is exactly paired and privileges no format's path
+#
+# `population` sampling means the correlation matrix carries NO sampling noise, so FP64
+# recovers the skeleton essentially perfectly and any deviation at lower precision is
+# attributable to precision alone. Switch to `sample` for E4.1's harm question, where
+# FP64 itself makes errors and the comparison is against ground truth.
+#
+# 30 seeds: edges_changed is a small integer per seed, so the seed is the independent
+# replicate and the mean needs replication to be worth quoting.
+experiment: e2_1_amplification
+mode: cascade
+n_vars: 25
+n_obs: 1000
+seeds: [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29]
+formats: [float64, float32, tf32, float16, bfloat16, float8_e4m3, float8_e5m2]
+alpha_run: 0.01
+max_level: 3
+stable_variants: [true]
+stop_at_first: true
+dataset:
+  kind: dag
+  edge_prob: 0.15
+  sampling: population
+undefined_policy: exclude

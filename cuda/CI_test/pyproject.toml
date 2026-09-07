@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "precision-pc"
+version = "0.1.0"
+description = "Precision requirements for constraint-based causal discovery: experiment harness"
+requires-python = ">=3.10"
+
+# Deliberately small. The scientific contribution (Q1) is a question about arithmetic,
+# not hardware, so the core path must import on a laptop and on a compute node with no
+# GPU and no network. torch is an extra: it is needed only for E0.2 and Tier 5, and
+# importing it costs seconds and drags in CUDA init.
+dependencies = [
+    "numpy>=2.0",
+    "scipy>=1.15",
+    "numba>=0.60",
+    "ml_dtypes>=0.5",
+    "pandas>=2.0",
+    "pyarrow>=15",
+    "PyYAML>=6.0",
+    "threadpoolctl>=3.0",
+]
+
+[project.optional-dependencies]
+ref = ["mpmath>=1.3"]          # high-precision reference (np.float128 absent on Windows)
+plot = ["matplotlib>=3.9"]
+gpu = ["torch>=2.0"]           # E0.2 cross-device and Tier 5 only
+graph = ["causal-learn>=0.1.4"] # SHD and cross-implementation validation, Tier 2
+dev = ["pytest>=8.0", "mpmath>=1.3", "causal-learn>=0.1.4"]
+
+[project.scripts]
+precision-pc = "precision_pc.cli:main"
+
+[tool.setuptools]
+packages = ["precision_pc", "precision_pc.datasets", "precision_pc.experiments"]

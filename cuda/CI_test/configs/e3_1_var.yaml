@@ -1,0 +1,31 @@
+# E3.1 -- the time-series hazard (contribution C3), at gate G1's phi = 0.95.
+#
+# Lagged variables of an autocorrelated series are near-collinear BY CONSTRUCTION, so the
+# ill-conditioning lands inside the small submatrices a CI test actually inverts -- unlike
+# the synthetic controlled-kappa generator, whose ill-conditioning stays in the full
+# spectrum and never reaches the 3x3 blocks.
+#
+# n_vars is DERIVED (n_series * tau_max = 3 * 4 = 12) and any value set here is ignored.
+# The effective sample size is n_obs - tau_max + 1, because embedding costs observations.
+#
+# Sweep phi by re-running with a different `phi` and --run-id. Calibration to expect:
+# kappa(3x3) ~ 1/(1-phi), so phi=0.95 -> ~8e1, phi=0.99 -> ~4e2. That exercises TF32,
+# BF16 and FP8; it does NOT reach FP32's onset near kappa ~ 1e8, which would need
+# phi ~ 0.99999996. Use structure: factor or sampling_ratio to push further.
+experiment: e3_1_var
+mode: replay
+n_obs: 4000
+levels: [0, 1, 2]
+seeds: [0, 1, 2, 3, 4]
+formats: [float64, float32, tf32, float16, bfloat16, float8_e4m3, float8_e5m2]
+parcorr_variants: [inv]
+ztransform_variants: [log1p]
+alphas: [0.001, 0.01, 0.05]
+dataset:
+  kind: var
+  structure: ar1
+  phi: 0.95
+  tau_max: 4
+  n_series: 3
+undefined_policy: exclude
+per_test_storage: subsample

@@ -1,0 +1,19 @@
+# E0.1 -- the noise floor. Gate G0.
+#
+# FP64 against FP64, identical seed, single-threaded BLAS. The flip rate must be exactly
+# zero and the statistic vectors bitwise identical. Nothing in any other config means
+# anything until this passes, which is why `require_gate` is the default everywhere else
+# and why this config is the one that does not need it.
+experiment: e0_1_noise_floor
+mode: replay
+n_vars: 40
+n_obs: 400
+levels: [0]
+seeds: [0, 1, 2]
+formats: [float64]
+parcorr_variants: [inv]
+ztransform_variants: [log1p]
+alphas: [0.001, 0.01, 0.05]
+dataset: {kind: gaussian_iid}
+per_test_storage: full
+require_gate: false

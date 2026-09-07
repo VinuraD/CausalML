@@ -1,0 +1,11 @@
+# The proposal is binary. Without this, core.autocrlf=true rewrites LF to CRLF inside the
+# PDF on checkout and corrupts it -- git's text heuristic misclassifies this file.
+*.pdf binary
+
+# Parquet artifacts, should any ever be committed deliberately.
+*.parquet binary
+
+# Anything destined for a Linux compute node must keep LF endings in the working tree.
+# SLURM rejects a CRLF batch script outright:  "Batch script contains DOS line breaks"
+*.sh   text eol=lf
+*.sbatch text eol=lf

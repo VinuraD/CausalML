@@ -1,0 +1,23 @@
+# E1.1 + E1.2 -- flip rate across the precision ladder, mediated by condition number.
+#
+# The dataset is a correlation matrix built to a requested condition number, because that
+# is the explanatory variable of contribution C2. Levels 0-2 are all present, so the
+# level stratification of E1.3 falls out of the same run.
+#
+# Sweep kappa by running this config once per value with `--run-id`, e.g.
+#   for k in 1e2 1e4 1e6 1e8 1e10 1e12; do ... done
+# The kappa grid must reach 1e12: FP32's flip onset lives ABOVE 1e6, so a sweep that
+# stops at 1e6 would wrongly report FP32 as exact and could fire kill condition G1.
+experiment: e1_1_flip_rate
+mode: replay
+n_vars: 8
+n_obs: 200
+levels: [0, 1, 2]
+seeds: [0, 1, 2, 3, 4]
+formats: [float64, float32, tf32, float16, bfloat16, float8_e4m3, float8_e5m2]
+parcorr_variants: [inv]
+ztransform_variants: [log1p]
+alphas: [0.001, 0.01, 0.05]
+dataset: {kind: kappa, kappa: 1.0e8}
+undefined_policy: exclude
+per_test_storage: full
